@@ -1,0 +1,20 @@
+name: qun_market
+description: "Skill 驱动的行情复盘工具"
+publish_to: 'none'
+version: 0.1.0+1
+environment:
+  sdk: ^3.8.1
+dependencies:
+  flutter:
+    sdk: flutter
+  http: 1.3.0
+  flutter_secure_storage: 9.2.4
+  flutter_markdown_plus: ^1.0.7
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/SKILL.md
