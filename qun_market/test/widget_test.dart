@@ -2,8 +2,66 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:qun_market/main.dart';
+import 'package:qun_market/analysis_skill.dart';
 
 void main() {
+  testWidgets('全部Skill资源可加载，系统提示词使用唯一所选框架', (tester) async {
+    for (final skill in analysisSkills) {
+      final content = await skill.load();
+      expect(content.length, greaterThan(500));
+      final system = buildSkillSystem('证据规则', skill, content);
+      expect(system, contains('本次唯一分析框架：${skill.name}'));
+      expect(system, contains(content));
+    }
+    expect(analysisSkills.length, 10);
+    expect(analysisSkills.map((s) => s.id).toSet().length, 10);
+  });
+
+  testWidgets('Skill单选持久化，重启恢复并更新分析按钮', (tester) async {
+    await tester.runAsync(() async {
+      await tester.pumpWidget(const MarketApp());
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    });
+    await tester.pumpAndSettle();
+    expect(find.byType(ChoiceChip), findsNWidgets(10));
+    await tester.tap(find.widgetWithText(ChoiceChip, '炒股养家'));
+    await tester.pumpAndSettle();
+    expect(find.text('炒股养家 · 游资复盘框架'), findsOneWidget);
+    expect(find.text('自动搜索并用炒股养家 Skill 分析'), findsOneWidget);
+    expect(
+      await const FlutterSecureStorage().read(key: 'selected_skill'),
+      'chaoguyangjia',
+    );
+    await tester.pumpWidget(const SizedBox());
+    await tester.runAsync(() async {
+      await tester.pumpWidget(const MarketApp());
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('炒股养家 · 游资复盘框架'), findsOneWidget);
+  });
+
+  testWidgets('历史报告显示原Skill，不被当前选择覆盖', (tester) async {
+    FlutterSecureStorage.setMockInitialValues({
+      'selected_skill': 'bjchaojia',
+      'history':
+          '[{"title":"复盘测试","created":"2026-10-30","model":"test","status":"completed","report":"历史正文","skillId":"zhaolaoge","skillName":"赵老哥"}]',
+    });
+    await tester.runAsync(() async {
+      await tester.pumpWidget(const MarketApp());
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('北京炒家 · 游资复盘框架'), findsOneWidget);
+    await tester.tap(find.text('复盘档案'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Skill: 赵老哥'), findsOneWidget);
+    await tester.tap(find.text('查看详细分析报告'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Skill: 赵老哥'), findsOneWidget);
+    expect(find.text('历史正文'), findsOneWidget);
+  });
+
   testWidgets('重启读取未完成草稿并展示失败原因', (tester) async {
     FlutterSecureStorage.setMockInitialValues({
       'history':
@@ -31,7 +89,7 @@ void main() {
     });
     await tester.pumpAndSettle();
 
-    expect(find.text('陈小群 · 顶级游资复盘体系'), findsOneWidget);
+    expect(find.text('陈小群 · 游资复盘框架'), findsOneWidget);
     expect(find.text('自动搜索并用陈小群 Skill 分析'), findsOneWidget);
   });
 
@@ -113,5 +171,38 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('A'), findsNothing);
     expect(find.textContaining('暂无复盘记录'), findsOneWidget);
+  });
+
+  testWidgets('多种屏幕比例与大字体下页面无溢出', (tester) async {
+    const sizes = [
+      Size(320, 568),
+      Size(360, 800),
+      Size(375, 667), // iPhone 7
+      Size(412, 915),
+      Size(800, 1280),
+      Size(915, 412),
+    ];
+    for (final size in sizes) {
+      for (final scale in [1.0, 2.0]) {
+        tester.view.physicalSize = size;
+        tester.view.devicePixelRatio = 1;
+        tester.platformDispatcher.textScaleFactorTestValue = scale;
+        await tester.runAsync(() async {
+          await tester.pumpWidget(const MarketApp());
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        });
+        await tester.pumpAndSettle();
+        for (final tab in ['Skill 分析', '复盘档案', '模型配置']) {
+          await tester.tap(find.text(tab).last);
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull, reason: '$size x$scale $tab');
+        }
+      }
+    }
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+      tester.platformDispatcher.clearAllTestValues();
+    });
   });
 }

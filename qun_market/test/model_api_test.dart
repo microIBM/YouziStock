@@ -5,6 +5,32 @@ import 'package:http/testing.dart';
 import 'package:qun_market/model_api.dart';
 
 void main() {
+  test('诊断保留网络原因并隐藏地址凭据', () async {
+    final events = <Map<String, dynamic>>[];
+    await expectLater(
+      requestModel(
+        client: MockClient((_) async => throw http.ClientException(
+          'Connection refused, errno = 61, uri=http://user:password@host.test:8080/private?token=private-token',
+        )),
+        endpoint: 'http://host.test:8080', protocol: 'responses',
+        model: 'm', key: 'secret-key', system: 's', prompt: 'p',
+        onDiagnostic: events.add,
+      ),
+      throwsA(predicate((e) {
+        final text = e.toString();
+        return text.contains('Connection refused') &&
+            text.contains('host.test:8080') &&
+            !text.contains('password') && !text.contains('private-token');
+      })),
+    );
+  });
+  test('诊断隐藏密钥和认证头', () {
+    final text = safeError('bad secret-key Bearer other-token sk-test123', 'secret-key');
+    expect(text, isNot(contains('secret-key')));
+    expect(text, isNot(contains('other-token')));
+    expect(text, isNot(contains('sk-test123')));
+  });
+
   test('推理强度按协议映射，默认省略参数', () async {
     for (final protocol in ['responses', 'openai']) {
       for (final effort in reasoningEfforts.keys) {

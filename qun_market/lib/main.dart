@@ -1,3 +1,4 @@
+import 'analysis_skill.dart';
 import 'market_research.dart';
 import 'market_quote.dart';
 import 'dart:convert';
@@ -185,7 +186,9 @@ class ReportBody extends StatelessWidget {
               color: Color(0xffdce4ef),
             ),
             tableCellsPadding: const EdgeInsets.all(10),
-            tableColumnWidth: const FlexColumnWidth(),
+            tableColumnWidth: MediaQuery.sizeOf(context).width < 600
+                ? const FixedColumnWidth(150)
+                : const FlexColumnWidth(),
             tableBorder: TableBorder.all(color: const Color(0xff4a2a2e)),
             code: const TextStyle(
               fontSize: 14,
@@ -305,7 +308,7 @@ class MarketApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
     debugShowCheckedModeBanner: false,
-    title: '群策 · 陈小群 Skill 股市分析',
+    title: '群策 · 多 Skill 股市分析',
     theme: ThemeData(
       useMaterial3: true,
       brightness: Brightness.dark,
@@ -339,6 +342,18 @@ class MarketApp extends StatelessWidget {
         ),
       ),
     ),
+    builder: (context, child) {
+      final mq = MediaQuery.of(context);
+      return MediaQuery(
+        data: mq.copyWith(
+          textScaler: mq.textScaler.clamp(
+            minScaleFactor: 0.85,
+            maxScaleFactor: 1.3,
+          ),
+        ),
+        child: child!,
+      );
+    },
     home: const Workspace(),
   );
 }
@@ -393,7 +408,9 @@ class _WorkspaceState extends State<Workspace> {
     old.close();
   }
 
-  String skill = '';
+  AnalysisSkill selectedSkill = analysisSkills.first;
+  AnalysisSkill reportSkill = analysisSkills.first;
+  String? lastSkillId;
   String report = '';
   bool reportIncomplete = false;
   int analysisMinutes = 30;
@@ -437,7 +454,8 @@ class _WorkspaceState extends State<Workspace> {
 
   Future<void> load() async {
     try {
-      skill = await rootBundle.loadString('assets/SKILL.md');
+      selectedSkill = skillById(await store.read(key: 'selected_skill'));
+      lastSkillId = await store.read(key: 'last_skill');
       lastError = await store.read(key: 'last_error') ?? '';
       lastQuestion = await store.read(key: 'last_question') ?? '';
       final diagnosticJson = await store.read(key: 'diagnostics');
@@ -654,7 +672,11 @@ class _WorkspaceState extends State<Workspace> {
     return gathered;
   }
 
-  Future<String> callModel(String userPrompt) => requestModel(
+  Future<String> callModel(
+    String userPrompt,
+    AnalysisSkill chosen,
+    String skillContent,
+  ) => requestModel(
     onDiagnostic: (event) => activeDiagnostic.addAll(event),
     client: client,
     endpoint: aEndpoint,
@@ -662,7 +684,7 @@ class _WorkspaceState extends State<Workspace> {
     reasoningEffort: aEffort,
     model: aModel,
     key: aKey.trim(),
-    system: '$guard\n<skill_chenxiaoqun>\n$skill\n</skill_chenxiaoqun>',
+    system: buildSkillSystem(guard, chosen, skillContent),
     prompt: userPrompt,
     firstTimeout: const Duration(seconds: 120),
     idleTimeout: const Duration(minutes: 5),
@@ -727,6 +749,9 @@ class _WorkspaceState extends State<Workspace> {
       return;
     }
 
+    final chosen = selectedSkill;
+    reportSkill = chosen;
+    lastSkillId = chosen.id;
     cancelRequested = false;
     final attemptStarted = DateTime.now();
     lastQuestion = q;
@@ -737,6 +762,8 @@ class _WorkspaceState extends State<Workspace> {
       'model': safeError(aModel.trim(), aKey.trim()),
       'effort': aEffort,
       'limitMinutes': aMinutes,
+      'skillId': chosen.id,
+      'skillName': chosen.name,
       'status': 'running',
     };
     setState(() {
@@ -755,6 +782,11 @@ class _WorkspaceState extends State<Workspace> {
     bool generated = false;
     try {
       await store.write(key: 'last_question', value: q);
+      await store.write(key: 'last_skill', value: chosen.id);
+      stage = 'Skill加载';
+      final skillContent = await chosen.load();
+      if (cancelRequested) throw Exception('用户已中止分析');
+      stage = '行情检索';
       // 1. 自动搜索与提取材料
       final gathered = await autoGatherMarketData(q);
       if (cancelRequested) throw Exception('用户已中止分析');
@@ -765,10 +797,10 @@ class _WorkspaceState extends State<Workspace> {
       setState(() {
         lastGatheredData = mat;
         lastGatheredSource = src;
-        status = '已获取材料，正在运用陈小群 Skill 模型推理…';
+        status = '已获取材料，正在运用${chosen.name} Skill 模型推理…';
       });
 
-      // 2. 组装陈小群 Prompt 进行深度推理
+      // 2. 使用本次锁定的 Skill 进行分析
       final prompt =
           '''【用户提问/标的】: $q
 【检索材料时间】: $stamp
@@ -776,7 +808,7 @@ class _WorkspaceState extends State<Workspace> {
 【自动搜索到的市场与标的材料】:
 $mat
 
-请结合陈小群战法核心维度（主线周期、龙头博弈、预期差分歧、流动性研判）给出详尽、有证据的推演报告。
+本次选择：${chosen.name} Skill。重点维度：${chosen.focus}。请基于所选框架给出精简、有证据的复盘报告，明确体现其判断侧重，不能混用其他人物框架。
 如果问题属于全市场或板块复盘，输出前检查：是否单列全市场总龙状态；每个板块是否都有总龙候选／连板锚、20cm弹性、中军／容量核心、补涨观察四类角色。缺证据写未确认和原因，不省略行、不编造标的。先输出角色表及依据，再展开说明。个股问题只分析该股的角色依据，不强制扩写全市场。''';
 
       stage = '模型分析';
@@ -789,13 +821,15 @@ $mat
               '模型生成中：已等待 ${seconds ~/ 60}分${seconds % 60}秒，收到 ${report.length} 字；上限 $aMinutes 分钟',
         );
       });
-      final output = await callModel(prompt);
+      final output = await callModel(prompt, chosen, skillContent);
       if (cancelRequested) throw Exception('用户已中止分析');
 
       generated = true;
       activeDiagnostic['status'] = 'completed';
       final record = <String, dynamic>{
         'status': 'completed',
+        'skillId': chosen.id,
+        'skillName': chosen.name,
         'created': stamp,
         'title': q,
         'report': output,
@@ -843,6 +877,8 @@ $mat
       if (!generated && report.trim().isNotEmpty) {
         final record = <String, dynamic>{
           'status': 'incomplete',
+          'skillId': chosen.id,
+          'skillName': chosen.name,
           'created': DateTime.now().toIso8601String(),
           'title': q,
           'report': report,
@@ -896,9 +932,10 @@ $mat
     }
   }
 
-  void retryAnalysis(String originalQuestion) {
+  void retryAnalysis(String originalQuestion, {String? skillId}) {
     if (busy || testing || originalQuestion.trim().isEmpty) return;
     setState(() {
+      selectedSkill = skillById(skillId ?? selectedSkill.id);
       question.text = originalQuestion;
       tab = 0;
     });
@@ -945,6 +982,16 @@ $mat
     super.dispose();
   }
 
+  Future<void> selectSkill(AnalysisSkill choice) async {
+    if (busy || testing) return;
+    setState(() => selectedSkill = choice);
+    try {
+      await store.write(key: 'selected_skill', value: choice.id);
+    } catch (_) {
+      notice('已切换，本次选择未能保存到本机');
+    }
+  }
+
   // --- UI 组件 ---
 
   Widget homeView() => SingleChildScrollView(
@@ -953,7 +1000,7 @@ $mat
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // 顶部陈小群 Skill 标牌
+        // 单选分析框架
         Container(
           padding: const EdgeInsets.all(18),
           decoration: BoxDecoration(
@@ -970,7 +1017,10 @@ $mat
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   Container(
                     padding: const EdgeInsets.symmetric(
@@ -990,21 +1040,46 @@ $mat
                       ),
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  const Text(
-                    '陈小群 · 顶级游资复盘体系',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  Text(
+                    '${selectedSkill.name} · 游资复盘框架',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ],
               ),
               const SizedBox(height: 10),
-              const Text(
-                '主线题材辨识 · 龙头换手封板 · 预期差与分歧转一致 · 流动性承接',
-                style: TextStyle(
+              Text(
+                selectedSkill.focus,
+                style: const TextStyle(
                   color: Colors.white70,
                   fontSize: 13,
                   height: 1.4,
                 ),
+              ),
+              const SizedBox(height: 14),
+              const Text('选择分析 Skill（每次单选）'),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: analysisSkills
+                    .map(
+                      (choice) => ChoiceChip(
+                        label: Text(choice.name),
+                        selected: selectedSkill.id == choice.id,
+                        onSelected: busy || testing
+                            ? null
+                            : (_) => selectSkill(choice),
+                      ),
+                    )
+                    .toList(),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                '仅使用所选框架；分析中锁定选择。',
+                style: TextStyle(color: Colors.white54, fontSize: 12),
               ),
             ],
           ),
@@ -1063,7 +1138,7 @@ $mat
                     label: Text(
                       busy
                           ? (status.isEmpty ? '处理中...' : status)
-                          : '自动搜索并用陈小群 Skill 分析',
+                          : '自动搜索并用${selectedSkill.name} Skill 分析',
                       style: const TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 15,
@@ -1112,7 +1187,7 @@ $mat
           OutlinedButton.icon(
             onPressed: busy || testing
                 ? null
-                : () => retryAnalysis(lastQuestion),
+                : () => retryAnalysis(lastQuestion, skillId: lastSkillId),
             icon: const Icon(Icons.refresh),
             label: const Text('重试原问题（重新取数，使用当前模型配置）'),
           ),
@@ -1164,7 +1239,7 @@ $mat
                         child: Text(
                           reportIncomplete
                               ? (busy ? '正在生成 · 未完成正文' : '未完成草稿 · 不作为完整报告')
-                              : '陈小群战法复盘报告',
+                              : '${reportSkill.name} Skill 复盘报告',
                           style: TextStyle(
                             fontSize: 18,
                             fontWeight: FontWeight.bold,
@@ -1186,6 +1261,25 @@ $mat
                         },
                       ),
                     ],
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton.icon(
+                    onPressed: busy
+                        ? null
+                        : () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => ReportDetailPage(
+                                title: '${reportSkill.name} Skill 复盘报告',
+                                subtitle: '本次分析框架：${reportSkill.name}',
+                                report: report,
+                                incompleteNote: reportIncomplete
+                                    ? '未完成草稿，不作为完整报告。\n$lastError'
+                                    : null,
+                              ),
+                            ),
+                          ),
+                    icon: const Icon(Icons.open_in_new, size: 18),
+                    label: Text(busy ? '生成结束后可查看详细报告' : '查看详细报告'),
                   ),
                   const Divider(color: Color(0xff3d2024), height: 24),
                   ReportBody(data: report),
@@ -1328,7 +1422,7 @@ $mat
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '${r['created']} · 模型: ${r['model']}',
+                  '${r['created']} · Skill: ${r['skillName'] ?? '陈小群'} · 模型: ${r['model']}',
                   style: const TextStyle(color: Colors.white38, fontSize: 12),
                 ),
                 const SizedBox(height: 8),
@@ -1343,7 +1437,8 @@ $mat
                       MaterialPageRoute(
                         builder: (_) => ReportDetailPage(
                           title: '${r['title']}',
-                          subtitle: '${r['created']} · 模型: ${r['model']}',
+                          subtitle:
+                              '${r['created']} · Skill: ${r['skillName'] ?? '陈小群'} · 模型: ${r['model']}',
                           report: r['report'] as String,
                           incompleteNote: r['status'] == 'incomplete'
                               ? '未完成草稿，不作为完整报告。\n${r['error'] ?? ''}'
@@ -1352,7 +1447,12 @@ $mat
                               ? () {
                                   Navigator.of(context).pop();
                                   if (!busy && !testing) {
-                                    retryAnalysis(r['title'] as String);
+                                    retryAnalysis(
+                                      r['title'] as String,
+                                      skillId:
+                                          r['skillId'] as String? ??
+                                          'chenxiaoqun',
+                                    );
                                   }
                                 }
                               : null,
@@ -1614,23 +1714,32 @@ $mat
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.trending_up, color: Color(0xffffc857)),
-            SizedBox(width: 8),
-            Text('群策 · 牛市研究', style: TextStyle(fontWeight: FontWeight.bold)),
-          ],
+        title: const FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.trending_up, color: Color(0xffffc857)),
+              SizedBox(width: 8),
+              Text('群策 · 牛市研究', style: TextStyle(fontWeight: FontWeight.bold)),
+            ],
+          ),
         ),
         backgroundColor: const Color(0xff1a0d10),
         elevation: 0,
       ),
-      body: switch (tab) {
-        0 => homeView(),
-        1 => historyView(),
-        2 => settingsView(),
-        _ => homeView(),
-      },
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 860),
+          child: switch (tab) {
+            0 => homeView(),
+            1 => historyView(),
+            2 => settingsView(),
+            _ => homeView(),
+          },
+        ),
+      ),
       floatingActionButton: showTop && tab < 2
           ? FloatingActionButton.small(
               tooltip: '回到顶部',
@@ -1649,7 +1758,10 @@ $mat
           showTop = false;
         }),
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.trending_up), label: '陈小群分析'),
+          NavigationDestination(
+            icon: Icon(Icons.trending_up),
+            label: 'Skill 分析',
+          ),
           NavigationDestination(icon: Icon(Icons.history), label: '复盘档案'),
           NavigationDestination(icon: Icon(Icons.settings), label: '模型配置'),
         ],

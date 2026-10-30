@@ -42,7 +42,11 @@ String safeError(Object error, String key) {
     'Bearer [已隐藏]',
   );
   text = text.replaceAll(RegExp(r'sk-[A-Za-z0-9_-]+'), '[密钥已隐藏]');
-  text = text.replaceAll(RegExp(r'https?://[^\s<>]+'), '[请求地址已隐藏]');
+  text = text.replaceAllMapped(RegExp(r'https?://[^\s<>]+'), (match) {
+    final uri = Uri.tryParse(match[0]!);
+    if (uri == null || uri.host.isEmpty) return '[请求地址已隐藏]';
+    return '${uri.scheme}://${uri.host}:${uri.port}/[路径及参数已隐藏]';
+  });
   return text.length > 1200 ? '${text.substring(0, 1200)}…' : text;
 }
 
@@ -112,9 +116,15 @@ Future<String> requestModel({
         .send(request)
         .timeout(firstTimeout < totalTimeout ? firstTimeout : totalTimeout);
   } on TimeoutException {
-    throw Exception('模型首响应超时：未在 ${firstTimeout.inSeconds} 秒内返回响应头');
-  } on http.ClientException {
-    throw Exception('模型网络连接失败：请检查设备网络和接口地址');
+    throw Exception(
+      '模型首响应超时：未在 ${firstTimeout.inSeconds} 秒内返回响应头（目标：${url.host}:${url.port}）',
+    );
+  } on http.ClientException catch (e) {
+    final detail = safeError(e, key);
+    throw Exception('模型网络连接失败（目标：${url.host}:${url.port}）：$detail');
+  } catch (e) {
+    final detail = safeError(e, key);
+    throw Exception('网络请求异常（目标：${url.host}:${url.port}）：$detail');
   }
   onDiagnostic?.call({
     'httpStatus': response.statusCode,
@@ -205,6 +215,10 @@ Future<String> requestModel({
         ? '超过总时长 ${totalTimeout.inSeconds} 秒'
         : '连续 ${idleTimeout.inSeconds} 秒未收到数据';
     throw Exception('模型响应超时：$reason；已收到正文 ${partial.length} 字，未完成内容不作为完整报告');
+  } on http.ClientException catch (e) {
+    throw Exception(
+      '模型接收中断（目标：${url.host}:${url.port}，已收到 ${partial.length} 字）：${safeError(e, key)}',
+    );
   } finally {
     await iterator.cancel();
   }
